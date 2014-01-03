@@ -6,42 +6,43 @@ from pandas.compat import range, lrange
 import numpy as np
 
 
-def scoreatpercentile(a, per, limit=(), interpolation_method='fraction'):
-    """Calculate the score at the given `per` percentile of the sequence `a`.
+def scoreatpercentile(a, per, limit=(), interpolation_method='fraction',
+        axis=0):
+    """
+    Calculate the score at a given percentile of the input sequence.
 
     For example, the score at `per=50` is the median. If the desired quantile
     lies between two data points, we interpolate between them, according to
-    the value of `interpolation`. If the parameter `limit` is provided, it
-    should be a tuple (lower, upper) of two values. Values of `a` outside
-    this (closed) interval will be ignored.
-
-    The `interpolation_method` parameter supports three values, namely
-    `fraction` (default), `lower` and `higher`. Interpolation is done only,
-    if the desired quantile lies between two data points `i` and `j`. For
-    `fraction`, the result is an interpolated value between `i` and `j`;
-    for `lower`, the result is `i`, for `higher` the result is `j`.
+    the value of `interpolation_method`. If the parameter `limit` is provided,
+    it should be a tuple (lower, upper) of two values.
 
     Parameters
     ----------
-    a : ndarray
-        Values from which to extract score.
-    per : scalar
-        Percentile at which to extract score.
+    a : array_like
+        A 1-D array of values from which to extract score.
+    per : scalar or array_like
+        Percentile(s) at which to extract score.  Values should be in range
+        [0,100].
     limit : tuple, optional
         Tuple of two scalars, the lower and upper limits within which to
-        compute the percentile.
+        compute the percentile. Values of `a` outside
+        this (closed) interval will be ignored.
     interpolation_method : {'fraction', 'lower', 'higher'}, optional
         This optional parameter specifies the interpolation method to use,
-        when the desired quantile lies between two data points `i` and `j`:
+        when the desired quantile lies between two data points `i` and `j`
 
-        - fraction: `i + (j - i)*fraction`, where `fraction` is the
-                    fractional part of the index surrounded by `i` and `j`.
-        - lower: `i`.
-        - higher: `j`.
+          - fraction: ``i + (j - i) * fraction`` where ``fraction`` is the
+            fractional part of the index surrounded by ``i`` and ``j``.
+          - lower: ``i``.
+          - higher: ``j``.
+
+    axis : int, optional
+        Axis along which the percentile(s) are computed. The default
+        is to compute the percentile(s) along axis 0.
 
     Returns
     -------
-    score : float
+    score : float (or sequence of floats)
         Score at percentile.
 
     See Also
@@ -56,36 +57,65 @@ def scoreatpercentile(a, per, limit=(), interpolation_method='fraction'):
     49.5
 
     """
-    # TODO: this should be a simple wrapper around a well-written quantile
-    # function.  GNU R provides 9 quantile algorithms (!), with differing
-    # behaviour at, for example, discontinuities.
-    values = np.sort(a, axis=0)
-    if limit:
-        values = values[(limit[0] <= values) & (values <= limit[1])]
+    # adapted from NumPy's percentile function
+    a = np.asarray(a)
 
-    idx = per / 100. * (values.shape[0] - 1)
-    if idx % 1 == 0:
-        score = values[idx]
-    else:
-        if interpolation_method == 'fraction':
-            score = _interpolate(values[int(idx)], values[int(idx) + 1],
-                                 idx % 1)
-        elif interpolation_method == 'lower':
-            score = values[np.floor(idx)]
+    if limit:
+        a = a[(limit[0] <= a) & (a <= limit[1])]
+
+    if per == 0:
+        return a.min(axis=axis)
+    elif per == 100:
+        return a.max(axis=axis)
+
+    sorted = np.sort(a, axis=axis)
+    if axis is None:
+        axis = 0
+
+    return _compute_qth_percentile(sorted, per, interpolation_method, axis)
+
+
+# handle sequence of per's without calling sort multiple times
+def _compute_qth_percentile(sorted, per, interpolation_method, axis):
+    if not np.isscalar(per):
+        return [_compute_qth_percentile(sorted, i, interpolation_method, axis)
+             for i in per]
+
+    if (per < 0) or (per > 100):
+        raise ValueError("percentile must be in the range [0, 100]")
+
+    indexer = [slice(None)] * sorted.ndim
+    idx = per / 100. * (sorted.shape[axis] - 1)
+
+    if int(idx) != idx:
+        # round fractional indices according to interpolation method
+        if interpolation_method == 'lower':
+            idx = int(np.floor(idx))
         elif interpolation_method == 'higher':
-            score = values[np.ceil(idx)]
+            idx = int(np.ceil(idx))
+        elif interpolation_method == 'fraction':
+            pass  # keep idx as fraction and interpolate
         else:
             raise ValueError("interpolation_method can only be 'fraction', "
                              "'lower' or 'higher'")
 
-    return score
+    i = int(idx)
+    if i == idx:
+        indexer[axis] = slice(i, i + 1)
+        weights = np.array(1)
+        sumval = 1.0
+    else:
+        indexer[axis] = slice(i, i + 2)
+        j = i + 1
+        weights = np.array([(j - idx), (idx - i)], float)
+        wshape = [1] * sorted.ndim
+        wshape[axis] = 2
+        weights.shape = wshape
+        sumval = weights.sum()
 
+    # Use np.add.reduce to coerce data type
+    return np.add.reduce(sorted[indexer] * weights, axis=axis) / sumval
 
-def _interpolate(a, b, fraction):
-    """Returns the point at the given fraction between a and b, where
-    'fraction' must be between 0 and 1.
-    """
-    return a + (b - a) * fraction
 
 
 def rankdata(a):
@@ -152,7 +182,8 @@ def fastsort(a):
 
 
 def percentileofscore(a, score, kind='rank'):
-    """The percentile rank of a score relative to a list of scores.
+    """
+    The percentile rank of a score relative to a list of scores.
 
     A `percentileofscore` of, for example, 80% means that 80% of the
     scores in `a` are below the given score. In the case of gaps or
@@ -160,11 +191,11 @@ def percentileofscore(a, score, kind='rank'):
 
     Parameters
     ----------
-    a: array like
+    a : array_like
         Array of scores to which `score` is compared.
-    score: int or float
+    score : int or float
         Score that is compared to the elements in `a`.
-    kind: {'rank', 'weak', 'strict', 'mean'}, optional
+    kind : {'rank', 'weak', 'strict', 'mean'}, optional
         This optional parameter specifies the interpretation of the
         resulting score:
 
